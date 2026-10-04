@@ -1,0 +1,13 @@
+-------------------------------------------------------------------------------
+Test set: com.sentinelai.incidents.IncidentStateMachineTest
+-------------------------------------------------------------------------------
+Tests run: 17, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.218 s <<< FAILURE! -- in com.sentinelai.incidents.IncidentStateMachineTest
+com.sentinelai.incidents.IncidentStateMachineTest.cannotSkipBackwardsInTheLifecycle -- Time elapsed: 0.007 s <<< FAILURE!
+java.lang.AssertionError: 
+
+Expecting code to raise a throwable.
+	at com.sentinelai.incidents.IncidentStateMachineTest.cannotSkipBackwardsInTheLifecycle(IncidentStateMachineTest.java:48)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+

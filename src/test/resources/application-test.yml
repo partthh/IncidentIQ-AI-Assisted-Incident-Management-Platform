@@ -1,0 +1,31 @@
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+  flyway:
+    enabled: true
+    # Tests share one embedded server; parallel classes would race on migrations.
+    clean-disabled: false
+
+logging:
+  level:
+    root: WARN
+    com.sentinelai: INFO
+    org.flywaydb: INFO
+    io.zonky.test: WARN
+
+sentinel:
+  investigation:
+    provider: stub
+    model: sentinel-stub-v1
+    poll-interval-ms: 200
+    stub-latency-ms: 0
+    job-processor-enabled: true
+    retry-backoff: 100ms
+    request-timeout: 5s
+
+  seed:
+    enabled: true
