@@ -14,6 +14,7 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.AuthenticationEntryPoint;
+import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.web.cors.CorsConfiguration;
@@ -33,7 +34,8 @@ public class SecurityConfig {
     @Bean
     SecurityFilterChain filterChain(HttpSecurity http,
                                      JwtAuthenticationFilter jwtFilter,
-                                     AuthenticationEntryPoint apiAuthenticationEntryPoint) throws Exception {
+                                     AuthenticationEntryPoint apiAuthenticationEntryPoint,
+                                     AccessDeniedHandler apiAccessDeniedHandler) throws Exception {
         http
                 .csrf(AbstractHttpConfigurer::disable)
                 .cors(Customizer.withDefaults())
@@ -58,7 +60,9 @@ public class SecurityConfig {
                         .requestMatchers("/api/v1/detection-rules/**").authenticated()
                         .requestMatchers("/api/v1/services/**", "/api/v1/metrics/**").authenticated()
                         .anyRequest().authenticated())
-                .exceptionHandling(ex -> ex.authenticationEntryPoint(apiAuthenticationEntryPoint))
+                .exceptionHandling(ex -> ex
+                        .authenticationEntryPoint(apiAuthenticationEntryPoint)
+                        .accessDeniedHandler(apiAccessDeniedHandler))
                 .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();
     }
@@ -75,6 +79,36 @@ public class SecurityConfig {
             response.setContentType("application/json");
             response.getWriter().write("""
                     {"status":401,"code":"UNAUTHENTICATED","message":"Authentication required","path":"%s"}"""
+                    .formatted(request.getRequestURI()));
+        };
+    }
+
+    /**
+     * An authenticated caller who is not allowed to do what they asked gets 403, not 401.
+     *
+     * <p>This exists because the default handler loses the answer. {@code
+     * AccessDeniedHandlerImpl} responds with {@code sendError(403)}, which makes the
+     * servlet container re-dispatch through {@code /error}; the security chain runs
+     * again on that dispatch with no principal, and the {@link AuthenticationEntryPoint}
+     * answers instead. The caller sees "401 UNAUTHENTICATED, Authentication required" for
+     * a request they were perfectly well authenticated for — a viewer attempting a write
+     * is told to log in again, which is both wrong and unactionable.
+     *
+     * <p>MockMvc does not reproduce the re-dispatch, so a test using it sees the correct
+     * 403 and misses this entirely. {@code AuthorizationStatusCodeTest} covers it over real
+     * HTTP for that reason.
+     *
+     * <p>Writing the response directly also avoids the second problem: {@code sendError}
+     * produces Boot's default error body, which has no {@code code} field and so does not
+     * match the envelope every other failure in this API uses.
+     */
+    @Bean
+    AccessDeniedHandler apiAccessDeniedHandler() {
+        return (request, response, accessDeniedException) -> {
+            response.setStatus(403);
+            response.setContentType("application/json");
+            response.getWriter().write("""
+                    {"status":403,"code":"FORBIDDEN","message":"Insufficient permissions for this action","path":"%s"}"""
                     .formatted(request.getRequestURI()));
         };
     }

@@ -33,6 +33,26 @@ public interface IncidentRepository extends JpaRepository<IncidentEntity, UUID>,
     @EntityGraph(attributePaths = "service")
     Page<IncidentEntity> findAll(Specification<IncidentEntity> spec, Pageable pageable);
 
+    /**
+     * Single-incident loads fetch the service too.
+     *
+     * <p>Not an optimisation here but a correctness requirement: the API layer reads
+     * {@code service} after the repository call has closed its transaction, so a lazy
+     * proxy would throw {@code LazyInitializationException} on a detached entity. Any
+     * new caller of {@code findById} gets a usable incident instead of a trap.
+     */
+    @Override
+    @EntityGraph(attributePaths = "service")
+    Optional<IncidentEntity> findById(UUID id);
+
+    /**
+     * Same reason as {@link #findById}: controllers enrich rows with the service name
+     * after the transaction ends, and one join beats N+1 for the batch.
+     */
+    @Override
+    @EntityGraph(attributePaths = "service")
+    List<IncidentEntity> findAllById(Iterable<UUID> ids);
+
     /** Active = not RESOLVED. Enforced in the query rather than in Java so it stays correct. */
     @Query("""
             select i from IncidentEntity i

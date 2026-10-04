@@ -18,8 +18,10 @@ import org.slf4j.LoggerFactory;
  * and jsonb containment queries. An in-memory substitute would let tests pass
  * that fail in production.
  *
- * <p>Started once per JVM and shared; Spring's context cache means subclasses
- * reuse the same database.
+ * <p>Started once per JVM and shared. Isolation between test classes comes from a
+ * schema per class ({@link TestSchema}) rather than a server per class: the expensive
+ * part is booting PostgreSQL, and a shared server with separate schemas gives the same
+ * guarantees at a fraction of the cost.
  */
 public final class EmbeddedPostgresHolder {
 
@@ -71,6 +73,8 @@ public final class EmbeddedPostgresHolder {
             // Argument order is (username, databaseName).
             jdbcUrl = server.getJdbcUrl(USER, DATABASE);
             log.info("Embedded PostgreSQL ready in {} ms at {}", System.currentTimeMillis() - startedAt, jdbcUrl);
+            // The data directory outlives the JVM, so start from a known set of schemas.
+            TestSchema.dropAll();
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to start embedded PostgreSQL for tests", e);
         }

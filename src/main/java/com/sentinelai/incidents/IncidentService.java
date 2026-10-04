@@ -82,7 +82,11 @@ public class IncidentService {
         }
         IncidentStateMachine.require(incident.getStatus(), IncidentStatus.ACKNOWLEDGED);
 
-        if (incident.getStatus() != IncidentStatus.ACKNOWLEDGED) {
+        // Ask the state machine rather than comparing statuses here: acknowledging an
+        // incident that is already under active investigation is a tolerated no-op, and
+        // writing ACKNOWLEDGED anyway would silently report that nobody is working a
+        // problem someone is working.
+        if (!IncidentStateMachine.isIdempotentNoOp(incident.getStatus(), IncidentStatus.ACKNOWLEDGED)) {
             incident.changeStatus(IncidentStatus.ACKNOWLEDGED);
             timeline.append(incident, actor.userId(), TimelineEventTypes.ACKNOWLEDGED,
                     actor.name() + " acknowledged the incident", Map.of("status", "ACKNOWLEDGED"));

@@ -11,6 +11,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 /**
@@ -56,19 +57,26 @@ public abstract class ApiTestSupport extends PostgresIntegrationTest {
         return tokenFor("viewer@sentinel.dev");
     }
 
-    protected MockHttpServletRequestBuilder as(MockHttpServletRequestBuilder builder, String token) {
-        return builder.header("Authorization", "Bearer " + token);
+    /**
+     * Adds a bearer token and performs the request.
+     *
+     * <p>Returns {@link ResultActions} rather than the builder so tests read as one
+     * fluent chain from request to assertion, and so no test can accidentally
+     * forget the {@code perform} call.
+     */
+    protected ResultActions as(MockHttpServletRequestBuilder builder, String token) throws Exception {
+        return mvc.perform(builder.header("Authorization", "Bearer " + token));
     }
 
-    protected MockHttpServletRequestBuilder asAdmin(MockHttpServletRequestBuilder builder) {
+    protected ResultActions asAdmin(MockHttpServletRequestBuilder builder) throws Exception {
         return as(builder, adminToken());
     }
 
-    protected MockHttpServletRequestBuilder asEngineer(MockHttpServletRequestBuilder builder) {
+    protected ResultActions asEngineer(MockHttpServletRequestBuilder builder) throws Exception {
         return as(builder, engineerToken());
     }
 
-    protected MockHttpServletRequestBuilder asViewer(MockHttpServletRequestBuilder builder) {
+    protected ResultActions asViewer(MockHttpServletRequestBuilder builder) throws Exception {
         return as(builder, viewerToken());
     }
 
@@ -82,8 +90,32 @@ public abstract class ApiTestSupport extends PostgresIntegrationTest {
         return result.getResponse().getContentAsString();
     }
 
+    /** Parses a response whose body is a JSON array rather than an object. */
+    protected <T> T read(MvcResult result, Class<T> type) {
+        try {
+            return json.readValue(bodyAsString(result), type);
+        } catch (Exception ex) {
+            throw new IllegalStateException("Could not parse test response", ex);
+        }
+    }
+
     protected String toJson(Object value) throws Exception {
         return json.writeValueAsString(value);
+    }
+
+    /**
+     * Serialises an inline request body.
+     *
+     * <p>MockMvc's {@code content(String)} will not accept a {@code Map}, so every
+     * inline body has to go through here. Having one name for it also means a
+     * change to how bodies are written is a one-line change.
+     */
+    protected String j(Object value) {
+        try {
+            return json.writeValueAsString(value);
+        } catch (Exception ex) {
+            throw new IllegalStateException("Could not serialise test body", ex);
+        }
     }
 
     protected MediaType json() {

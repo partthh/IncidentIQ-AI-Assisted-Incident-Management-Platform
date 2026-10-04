@@ -176,10 +176,13 @@ public class AnalysisController {
     /**
      * Deliberately transparent about what this is: untrusted text.
      *
-     * <p>{@code unvalidated} is part of the contract, not a disclaimer in a comment.
-     * A client that renders this field must not treat it as instructions.
+     * <p>The field is named {@code unvalidated} rather than {@code content} on purpose.
+     * A neutral name invites a client to render it as though it carried the same weight
+     * as the validated analysis; this one cannot be mistaken for anything other than
+     * the raw, unchecked reply — including any instruction-shaped text that arrived
+     * inside a log payload and was quoted back.
      */
     public record RawResponse(UUID analysisId, String reference, String modelName, AnalysisStatus status,
-                              String promptVersion, String content, java.time.Instant completedAt) {
+                              String promptVersion, String unvalidated, java.time.Instant completedAt) {
     }
 }

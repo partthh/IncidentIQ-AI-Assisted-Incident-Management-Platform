@@ -8,11 +8,17 @@ public class LlmException extends RuntimeException {
 
     private final Kind kind;
     private final int httpStatus;
+    private final String rawResponse;
 
     public LlmException(Kind kind, String message, int httpStatus, Throwable cause) {
+        this(kind, message, httpStatus, cause, null);
+    }
+
+    public LlmException(Kind kind, String message, int httpStatus, Throwable cause, String rawResponse) {
         super(message, cause);
         this.kind = kind;
         this.httpStatus = httpStatus;
+        this.rawResponse = rawResponse;
     }
 
     public LlmException(Kind kind, String message) {
@@ -30,6 +36,19 @@ public class LlmException extends RuntimeException {
 
     public int getHttpStatus() {
         return httpStatus;
+    }
+
+    /**
+     * Whatever the provider actually sent, when it sent something.
+     *
+     * <p>Only meaningful for {@link Kind#MALFORMED_RESPONSE}, where the failure is a
+     * property of the reply rather than of the transport. It is carried on the
+     * exception so the analysis row can record the unreadable text: a FAILED analysis
+     * with no record of what arrived is indistinguishable from a bug, and the operator
+     * who needs to judge the model — or the validator — has nothing to look at.
+     */
+    public String getRawResponse() {
+        return rawResponse;
     }
 
     /**

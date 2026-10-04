@@ -91,10 +91,11 @@ public class IncidentAnalysisService {
         } catch (RuntimeException ex) {
             // Not retried. The provider answered; re-sending the identical prompt to
             // the same model reliably produces the same unreadable answer, and
-            // burning the attempt budget would delay the FAILED status.
+            // burning the attempt budget would delay the FAILED status. The unreadable
+            // text travels with the exception so the row records what actually arrived.
             throw new LlmException(LlmException.Kind.MALFORMED_RESPONSE,
                     "Could not parse the model response as the agreed JSON contract: " + ex.getMessage(),
-                    0, ex);
+                    0, ex, response.rawContent());
         }
 
         IncidentAnalysis validated;

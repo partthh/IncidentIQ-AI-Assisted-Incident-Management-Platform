@@ -51,27 +51,24 @@ class IngestionIdempotencyTest extends ApiTestSupport {
         String key = "dup-" + UUID.randomUUID();
 
         // First submission trips the seeded p95 latency rule and opens an incident.
-        MvcResult first = asEngineer(post("/api/v1/events"))
-                .contentType(json()).content(payload(key, 1500, "payment-service"))
+        MvcResult first = ingest(key, 1500, "payment-service")
                 .andExpect(status().isAccepted()).andReturn();
         Map<String, Object> firstBody = body(first);
         assertThat(firstBody).containsEntry("duplicate", false);
         assertThat((Map<?, ?>) firstBody.get("incident")).isNotNull();
 
-        int eventsAfterFirst = (int) events.count();
+        long eventsAfterFirst = events.count();
         long incidentsAfterFirst = incidents.count();
 
         // Same producer, same key, retried.
-        MvcResult second = asEngineer(post("/api/v1/events"))
-                .contentType(json()).content(payload(key, 1500, "payment-service"))
+        MvcResult second = ingest(key, 1500, "payment-service")
                 .andExpect(status().isOk()).andReturn();
 
         Map<String, Object> secondBody = body(second);
         assertThat(secondBody).containsEntry("duplicate", true);
         assertThat(secondBody).containsEntry("eventId", firstBody.get("eventId"));
         assertThat(secondBody.get("matchedRules")).asList().isEmpty();
-        assertThat(secondBody.get("incident")).as(
-                "a retry must not run detection again").isNull();
+        assertThat(secondBody.get("incident")).as("a retry must not run detection again").isNull();
 
         // The duplicate did not inflate the incident's evidence count, which is the
         // part that would actually corrupt an investigation.
@@ -86,12 +83,8 @@ class IngestionIdempotencyTest extends ApiTestSupport {
         // one team's telemetry entirely, which is worse than a duplicate.
         String key = "shared-" + UUID.randomUUID();
 
-        MvcResult a = post("/api/v1/events").header(IngestEventRequest.SOURCE_HEADER, "team-a")
-                .contentType(json()).content(payload(key, 1500, "payment-service"))
-                .andExpect(status().is2xxSuccessful()).andReturn();
-        MvcResult b = post("/api/v1/events").header(IngestEventRequest.SOURCE_HEADER, "team-b")
-                .contentType(json()).content(payload(key, 1500, "payment-service"))
-                .andExpect(status().is2xxSuccessful()).andReturn();
+        MvcResult a = scopedIngest("team-a", key).andExpect(status().is2xxSuccessful()).andReturn();
+        MvcResult b = scopedIngest("team-b", key).andExpect(status().is2xxSuccessful()).andReturn();
 
         assertThat(body(a)).containsEntry("duplicate", false);
         assertThat(body(b)).containsEntry("duplicate", false);
@@ -103,16 +96,17 @@ class IngestionIdempotencyTest extends ApiTestSupport {
     void headerWinsOverBody() throws Exception {
         String key = "override-" + UUID.randomUUID();
 
-        MvcResult withHeader = post("/api/v1/events").header(IngestEventRequest.SOURCE_HEADER, "from-header")
-                .contentType(json()).content(payload(key, 1500, "payment-service", "from-body"))
+        MvcResult withHeader = asEngineer(post("/api/v1/events")
+                        .header(IngestEventRequest.SOURCE_HEADER, "from-header")
+                        .contentType(json())
+                        .content(payloadWithScope(key, 1500, "payment-service", "from-body")))
                 .andExpect(status().is2xxSuccessful()).andReturn();
 
         assertThat(body(withHeader).get("sourceEventId")).isEqualTo(key);
 
         // The same key under the body's scope is a different event, proving the header
-        // was actually used rather than merely preferred in one direction.
-        MvcResult withBody = post("/api/v1/events")
-                .contentType(json()).content(payload(key, 1500, "payment-service", "from-body"))
+        // was used rather than merely preferred in one direction.
+        MvcResult withBody = ingest(key, 1500, "payment-service")
                 .andExpect(status().is2xxSuccessful()).andReturn();
         assertThat(body(withBody)).containsEntry("duplicate", false);
     }
@@ -122,6 +116,7 @@ class IngestionIdempotencyTest extends ApiTestSupport {
     void concurrentDuplicatesCollapseToOneEvent() throws Exception {
         String key = "race-" + UUID.randomUUID();
         long before = events.count();
+        String payload = payload(key, 1500, "payment-service");
 
         int writers = 8;
         ExecutorService pool = Executors.newFixedThreadPool(writers);
@@ -131,9 +126,9 @@ class IngestionIdempotencyTest extends ApiTestSupport {
                     java.util.stream.IntStream.range(0, writers)
                             .mapToObj(i -> (Callable<MvcResult>) () -> {
                                 gate.await(5, java.util.concurrent.TimeUnit.SECONDS);
-                                return asEngineer(post("/api/v1/events"))
+                                return asEngineer(post("/api/v1/events")
                                         .contentType(json())
-                                        .content(payload(key, 1500, "payment-service"))
+                                        .content(payload))
                                         .andReturn();
                             })
                             .toList());
@@ -148,8 +143,21 @@ class IngestionIdempotencyTest extends ApiTestSupport {
                     })
                     .toList();
 
-            assertThat(bodies).allSatisfy(b -> assertThat(b).containsEntry("duplicate", false)
-                    .as("all writers succeed; the loser is told it is a duplicate, never rejected"));
+            // Every writer succeeds — none is told its event was rejected because a
+            // competitor arrived a millisecond earlier. Exactly one writer is the
+            // original and the rest are told it is a duplicate, so they stop retrying.
+            assertThat(bodies).allSatisfy(b -> assertThat(b).containsKeys("eventId", "duplicate"));
+            assertThat(bodies.stream().filter(b -> Boolean.FALSE.equals(b.get("duplicate"))).count())
+                    .as("exactly one writer may be the original").isEqualTo(1);
+            assertThat(bodies.stream().filter(b -> Boolean.TRUE.equals(b.get("duplicate"))).count())
+                    .as("every loser is told it is a duplicate, not an error").isEqualTo(writers - 1);
+
+            // Losers did no detection work, which is the part that would corrupt an
+            // investigation by inflating the incident's evidence count.
+            List<Map<String, Object>> losers = bodies.stream()
+                    .filter(b -> Boolean.TRUE.equals(b.get("duplicate")))
+                    .toList();
+            assertThat(losers).allSatisfy(b -> assertThat(b.get("matchedRules")).asList().isEmpty());
 
             // Every writer agrees on which event won.
             assertThat(bodies.stream().map(b -> b.get("eventId")).distinct()).hasSize(1);
@@ -164,16 +172,13 @@ class IngestionIdempotencyTest extends ApiTestSupport {
     void duplicateDoesNotInflateEvidence() throws Exception {
         String key = "inflate-" + UUID.randomUUID();
 
-        MvcResult first = asEngineer(post("/api/v1/events"))
-                .contentType(json()).content(payload(key, 1500, "payment-service"))
+        MvcResult first = ingest(key, 1500, "payment-service")
                 .andExpect(status().is2xxSuccessful()).andReturn();
         String incidentId = String.valueOf(((Map<?, ?>) body(first).get("incident")).get("incidentId"));
         int countAfterFirst = incidentEventCount(incidentId);
 
         for (int i = 0; i < 5; i++) {
-            asEngineer(post("/api/v1/events"))
-                    .contentType(json()).content(payload(key, 1500, "payment-service"))
-                    .andExpect(status().isOk());
+            ingest(key, 1500, "payment-service").andExpect(status().isOk());
         }
 
         assertThat(incidentEventCount(incidentId)).isEqualTo(countAfterFirst);
@@ -182,33 +187,29 @@ class IngestionIdempotencyTest extends ApiTestSupport {
     @Test
     @DisplayName("a repeat with a new key extends the active incident rather than opening another")
     void newKeyForTheSameFailureAbsorbsIntoTheActiveIncident() throws Exception {
-        long before = incidents.count();
-
-        MvcResult first = asEngineer(post("/api/v1/events"))
-                .contentType(json()).content(payload("absorb-a-" + UUID.randomUUID(), 1800, "payment-service"))
+        MvcResult first = ingest("absorb-a-" + UUID.randomUUID(), 1800, "payment-service")
                 .andExpect(status().is2xxSuccessful()).andReturn();
-        Map<?, ?> pointer = (Map<?, ?>) body(first).get("incident");
-        String incidentId = String.valueOf(pointer.get("incidentId"));
+        String incidentId = String.valueOf(((Map<?, ?>) body(first).get("incident")).get("incidentId"));
 
         // Same service, same threshold breach, different event id: the same outage.
-        MvcResult second = asEngineer(post("/api/v1/events"))
-                .contentType(json()).content(payload("absorb-b-" + UUID.randomUUID(), 1900, "payment-service"))
-                .andReturn();
+        // The first sample may open an incident or join one an earlier test left open,
+        // so the assertion is about the second sample, not about the absolute count.
+        long afterFirst = incidents.count();
+        MvcResult second = ingest("absorb-b-" + UUID.randomUUID(), 1900, "payment-service").andReturn();
 
         Map<?, ?> secondPointer = (Map<?, ?>) body(second).get("incident");
         assertThat(secondPointer).isNotNull();
         assertThat(secondPointer.get("incidentId")).as(
                 "an ongoing outage must not fragment into a second incident").isEqualTo(incidentId);
-        assertThat(incidents.count()).isEqualTo(before + 1);
+        assertThat(incidents.count()).as(
+                "a second sample of a failing service must not open a second incident")
+                .isEqualTo(afterFirst);
     }
 
     @Test
     @DisplayName("an unregistered service is rejected with an actionable message")
     void unknownServiceIsRejected() throws Exception {
-        String key = "unknown-" + UUID.randomUUID();
-
-        MvcResult result = asEngineer(post("/api/v1/events"))
-                .contentType(json()).content(payload(key, 1500, "no-such-service"))
+        MvcResult result = ingest("unknown-" + UUID.randomUUID(), 1500, "no-such-service")
                 .andExpect(status().isUnprocessableEntity())
                 .andReturn();
 
@@ -222,23 +223,18 @@ class IngestionIdempotencyTest extends ApiTestSupport {
     @Test
     @DisplayName("credentials are stripped before anything is stored")
     void secretsNeverReachTheDatabase() throws Exception {
-        String key = "secret-" + UUID.randomUUID();
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("sourceEventId", key);
-        payload.put("sourceScope", "test");
-        payload.put("service", "payment-service");
-        payload.put("environment", "staging");
+        Map<String, Object> payload = basePayload("secret-" + UUID.randomUUID(), 1500);
         payload.put("eventType", "LOG");
-        payload.put("severity", "ERROR");
         payload.put("message", "auth failed for alice@example.com token=abcdefghijklmnopqrstuvwx");
-        payload.put("occurredAt", Instant.now().toString());
         payload.put("metadata", Map.of("password", "hunter2", "p95LatencyMs", 1500));
 
-        MvcResult result = asEngineer(post("/api/v1/events")).contentType(json()).content(toJson(payload))
+        MvcResult result = asEngineer(post("/api/v1/events")
+                        .contentType(json()).content(toJson(payload)))
                 .andExpect(status().is2xxSuccessful()).andReturn();
 
         String eventId = String.valueOf(body(result).get("eventId"));
-        MvcResult stored = asViewer(get("/api/v1/events/" + eventId)).andExpect(status().isOk()).andReturn();
+        MvcResult stored = asViewer(get("/api/v1/events/" + eventId))
+                .andExpect(status().isOk()).andReturn();
         String raw = bodyAsString(stored);
 
         assertThat(raw).doesNotContain("hunter2");
@@ -252,19 +248,85 @@ class IngestionIdempotencyTest extends ApiTestSupport {
     @Test
     @DisplayName("a future timestamp beyond the skew allowance is rejected")
     void brokenProducerClockIsRejected() throws Exception {
-        Map<String, Object> payload = new HashMap<>(basePayload("skew-" + UUID.randomUUID(), 1500));
+        Map<String, Object> payload = basePayload("skew-" + UUID.randomUUID(), 1500);
         payload.put("occurredAt", Instant.now().plus(Duration.ofHours(2)).toString());
 
-        asEngineer(post("/api/v1/events")).contentType(json()).content(toJson(payload))
+        asEngineer(post("/api/v1/events").contentType(json()).content(toJson(payload)))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.code").value("CLOCK_SKEW"));
     }
 
     @Test
+    @DisplayName("a missing idempotency key is a validation failure, not a silent insert")
+    void missingSourceEventIdIsRejected() throws Exception {
+        Map<String, Object> payload = basePayload("ignored", 1500);
+        payload.remove("sourceEventId");
+
+        asEngineer(post("/api/v1/events").contentType(json()).content(toJson(payload)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+    }
+
+    @Test
+    @DisplayName("an out-of-vocabulary severity names the field instead of blaming the JSON")
+    void unrecognisedEnumValueIsReportedAsAFieldError() throws Exception {
+        // "WARN" is not a Severity. The body is perfectly valid JSON, so calling it
+        // "malformed" would send a producer looking for an escaping bug instead of at
+        // the one wrong value. This is the shape of the bug the simulator shipped:
+        // it invented a severity, and the API said something unhelpful about it.
+        Map<String, Object> payload = basePayload("enum-" + UUID.randomUUID(), 1500);
+        payload.put("severity", "WARN");
+
+        Map<String, Object> body = body(asEngineer(post("/api/v1/events")
+                        .contentType(json())
+                        .content(toJson(payload)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"))
+                .andReturn());
+
+        @SuppressWarnings("unchecked")
+        Map<String, String> details = (Map<String, String>) body.get("details");
+        assertThat(details).containsKey("severity");
+        assertThat(details.get("severity"))
+                .as("the message must name the accepted values so the fix is obvious")
+                .contains("WARN")
+                .contains("CRITICAL");
+    }
+
+    @Test
+    @DisplayName("bytes that are not JSON at all are still reported as malformed")
+    void structurallyBrokenJsonIsStillMalformed() throws Exception {
+        asEngineer(post("/api/v1/events").contentType(json()).content("{\"service\": \"payment"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("MALFORMED_REQUEST"));
+    }
+
+    @Test
+    @DisplayName("a quoted character inside a log message is data, not a parse error")
+    void embeddedQuotesAreAccepted() throws Exception {
+        // Log messages quote constantly — SQL fragments, JSON payloads, stack frames.
+        // If escaped quotes broke ingestion the module would be blind to precisely the
+        // errors an engineer most wants to see.
+        Map<String, Object> payload = basePayload("quoted-" + UUID.randomUUID(), 1500);
+        payload.put("eventType", "LOG");
+        payload.put("message", "column \"user_id\" does not exist; query was {\"table\":\"users\"}");
+
+        asEngineer(post("/api/v1/events").contentType(json()).content(toJson(payload)))
+                .andExpect(status().isOk());
+
+        String stored = events.findBySourceScopeAndSourceEventId("test",
+                        payload.get("sourceEventId").toString())
+                .orElseThrow()
+                .getMessage();
+        assertThat(stored).contains("user_id");
+    }
+
+    @Test
     @DisplayName("a VIEWER cannot write telemetry")
     void viewersCannotIngest() throws Exception {
-        asViewer(post("/api/v1/events"))
-                .contentType(json()).content(payload("viewer-" + UUID.randomUUID(), 1500, "payment-service"))
+        String payload = payload("viewer-" + UUID.randomUUID(), 1500, "payment-service");
+
+        asViewer(post("/api/v1/events").contentType(json()).content(payload))
                 .andExpect(status().isForbidden());
     }
 
@@ -273,14 +335,84 @@ class IngestionIdempotencyTest extends ApiTestSupport {
     void anonymousCannotIngest() throws Exception {
         long before = events.count();
 
-        post("/api/v1/events")
-                .contentType(json()).content(payload("anon-" + UUID.randomUUID(), 1500, "payment-service"))
+        mvc.perform(post("/api/v1/events")
+                        .contentType(json())
+                        .content(payload("anon-" + UUID.randomUUID(), 1500, "payment-service")))
                 .andExpect(status().isUnauthorized());
 
         assertThat(events.count()).isEqualTo(before);
     }
 
+    @Test
+    @DisplayName("the opened incident is queryable by reference")
+    void openedIncidentIsQueryable() throws Exception {
+        MvcResult ingestResult = ingest("query-" + UUID.randomUUID(), 2500, "payment-service")
+                .andExpect(status().isAccepted()).andReturn();
+
+        String reference = String.valueOf(((Map<?, ?>) body(ingestResult).get("incident")).get("reference"));
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                asViewer(get("/api/v1/incidents/by-reference/" + reference))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.reference").value(reference))
+                        .andExpect(jsonPath("$.status").value(IncidentStatus.OPEN.name())));
+    }
+
+    @Test
+    @DisplayName("the incident title quotes the producer's message, not the normalised signature")
+    void openedIncidentTitleIsReadable() throws Exception {
+        MvcResult result = ingest("title-" + UUID.randomUUID(), 2500, "payment-service")
+                .andExpect(status().isAccepted()).andReturn();
+
+        String reference = String.valueOf(((Map<?, ?>) body(result).get("incident")).get("reference"));
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                asViewer(get("/api/v1/incidents/by-reference/" + reference))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.title").value(org.hamcrest.Matchers.not(
+                                org.hamcrest.Matchers.containsString("<num>"))))
+                        .andExpect(jsonPath("$.title").value(org.hamcrest.Matchers.startsWith("payment-service: checkout")))
+                        .andExpect(jsonPath("$.title").value(org.hamcrest.Matchers.endsWith("(PAYMENT_P95_LATENCY_HIGH)"))));
+    }
+
+    @Test
+    @DisplayName("the error signature is normalised even though the title is not")
+    void errorSignatureStaysNormalised() throws Exception {
+        // The two fields serve different purposes and the contrast is the point: the
+        // signature must keep its placeholder (that is what collapses repeated reports into
+        // one incident), while the title must not (that is what a human reads).
+        //
+        // Deliberately asserting no specific p95 value. Two tests ingesting different
+        // latencies for the same service share a fingerprint — "checkout latency p95
+        // 1500ms" and "...2500ms" normalise to the same signature — so whichever opens the
+        // incident first supplies the title. Pinning a number here would make the test
+        // depend on execution order.
+        MvcResult result = ingest("sig-" + UUID.randomUUID(), 2500, "payment-service")
+                .andExpect(status().isAccepted()).andReturn();
+
+        String reference = String.valueOf(((Map<?, ?>) body(result).get("incident")).get("reference"));
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                asViewer(get("/api/v1/incidents/by-reference/" + reference))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.errorSignature")
+                                .value(org.hamcrest.Matchers.containsString("<num>"))));
+    }
+
     // ------------------------------------------------------------------ helpers
+
+    private org.springframework.test.web.servlet.ResultActions ingest(String key, int p95, String service)
+            throws Exception {
+        return asEngineer(post("/api/v1/events")
+                .contentType(json())
+                .content(payload(key, p95, service)));
+    }
+
+    private org.springframework.test.web.servlet.ResultActions scopedIngest(String scope, String key)
+            throws Exception {
+        return asEngineer(post("/api/v1/events")
+                .header(IngestEventRequest.SOURCE_HEADER, scope)
+                .contentType(json())
+                .content(payload(key, 1500, "payment-service")));
+    }
 
     private int incidentEventCount(String incidentId) {
         return incidents.findById(UUID.fromString(incidentId))
@@ -294,8 +426,8 @@ class IngestionIdempotencyTest extends ApiTestSupport {
         payload.put("sourceScope", "test");
         payload.put("service", "payment-service");
         payload.put("environment", "staging");
-        payload.put("eventType", "METRIC");
-        payload.put("severity", "ERROR");
+        payload.put("eventType", "LATENCY_SPIKE");
+        payload.put("severity", "HIGH");
         payload.put("message", "checkout latency p95 " + p95 + "ms");
         payload.put("occurredAt", Instant.now().minusSeconds(5).toString());
         payload.put("metadata", Map.of("p95LatencyMs", p95));
@@ -308,19 +440,10 @@ class IngestionIdempotencyTest extends ApiTestSupport {
         return toJson(payload);
     }
 
-    @Test
-    @DisplayName("the stored incident is queryable by reference once detection has run")
-    void openedIncidentIsQueryable() throws Exception {
-        MvcResult ingestResult = asEngineer(post("/api/v1/events"))
-                .contentType(json()).content(payload("query-" + UUID.randomUUID(), 2500, "payment-service"))
-                .andExpect(status().isAccepted()).andReturn();
-
-        String reference = String.valueOf(((Map<?, ?>) body(ingestResult).get("incident")).get("reference"));
-
-        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
-                asViewer(get("/api/v1/incidents/by-reference/" + reference))
-                        .andExpect(status().isOk())
-                        .andExpect(jsonPath("$.reference").value(reference))
-                        .andExpect(jsonPath("$.status").value(IncidentStatus.OPEN.name())));
+    private String payloadWithScope(String key, int p95, String service, String scope) throws Exception {
+        Map<String, Object> payload = basePayload(key, p95);
+        payload.put("service", service);
+        payload.put("sourceScope", scope);
+        return toJson(payload);
     }
 }

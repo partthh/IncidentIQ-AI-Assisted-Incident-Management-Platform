@@ -12,6 +12,7 @@ import com.sentinelai.events.EventRepository;
 import com.sentinelai.security.AppUser;
 import com.sentinelai.security.SentinelPrincipal;
 import com.sentinelai.support.ApiTestSupport;
+import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -25,6 +26,7 @@ import java.util.concurrent.Future;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.web.servlet.MvcResult;
 
@@ -48,22 +50,32 @@ class IncidentConcurrencyTest extends ApiTestSupport {
     private UUID incidentId;
     private long version;
 
+    /**
+     * Opens a fresh incident for the test that is about to run.
+     *
+     * <p>The test method name is part of the message on purpose. Every sample of the
+     * same failing service carries the same signature by design, so without a
+     * distinguishing element each test would inherit the incident an earlier test left
+     * in whatever state it happened to leave it — and a test that asserts
+     * {@code status == OPEN} would fail because an unrelated test had acknowledged.
+     * Per-test incidents keep the assertions about isolation honest.
+     */
     @BeforeEach
-    void openIncident() throws Exception {
+    void openIncident(TestInfo testInfo) throws Exception {
         Map<String, Object> payload = new HashMap<>();
         payload.put("sourceEventId", "conc-" + UUID.randomUUID());
         payload.put("sourceScope", "concurrency-test");
         payload.put("service", "payment-service");
         payload.put("environment", "staging");
-        payload.put("eventType", "METRIC");
-        payload.put("severity", "ERROR");
-        payload.put("message", "checkout p95 latency 2400ms");
+        payload.put("eventType", "LATENCY_SPIKE");
+        payload.put("severity", "HIGH");
+        payload.put("message", "checkout p95 latency 2400ms (" + testName(testInfo) + ")");
         payload.put("occurredAt", Instant.now().minusSeconds(3).toString());
         payload.put("metadata", Map.of("p95LatencyMs", 2400));
 
-        MvcResult ingest = asEngineer(post("/api/v1/events"))
-                .contentType(json()).content(toJson(payload))
-                .andExpect(status().isAccepted()).andReturn();
+        MvcResult ingest = asEngineer(post("/api/v1/events")
+                .contentType(json()).content(toJson(payload)))
+                .andExpect(status().is2xxSuccessful()).andReturn();
         Map<?, ?> pointer = (Map<?, ?>) body(ingest).get("incident");
         incidentId = UUID.fromString(String.valueOf(pointer.get("incidentId")));
 
@@ -72,19 +84,23 @@ class IncidentConcurrencyTest extends ApiTestSupport {
         version = ((Number) body(detail).get("version")).longValue();
     }
 
+    private static String testName(TestInfo testInfo) {
+        return testInfo.getTestMethod().map(Method::getName).orElse("unnamed");
+    }
+
     @Test
     @DisplayName("a stale expectedVersion is rejected with 409 CONCURRENT_MODIFICATION")
     void staleVersionIsRejected() throws Exception {
         // Someone else acts first.
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/acknowledge"))
-                .contentType(json()).content(Map.of("expectedVersion", version))
-                .andExpect(status().isOk());
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/acknowledge")
+                .contentType(json()).content(j(Map.of("expectedVersion", version)))
+                ).andExpect(status().isOk());
 
         // The stale dashboard now tries to act on the version it still remembers.
-        MvcResult conflict = asEngineer(post("/api/v1/incidents/" + incidentId + "/assignment"))
+        MvcResult conflict = asEngineer(post("/api/v1/incidents/" + incidentId + "/assignment")
                 .contentType(json())
-                .content(Map.of("expectedVersion", version,
-                        "assignee", Map.of("email", "marco@sentinel.dev")))
+                .content(j(Map.of("expectedVersion", version,
+                        "assignee", Map.of("email", "marco@sentinel.dev")))))
                 .andExpect(status().isConflict())
                 .andReturn();
 
@@ -95,14 +111,14 @@ class IncidentConcurrencyTest extends ApiTestSupport {
     @Test
     @DisplayName("If-Match is honoured so header-driven clients get the same protection")
     void ifMatchHeaderIsHonoured() throws Exception {
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes"))
-                .contentType(json()).content(Map.of("body", "first note"))
-                .andExpect(status().isOk());
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes")
+                .contentType(json()).content(j(Map.of("body", "first note")))
+                ).andExpect(status().isOk());
 
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes"))
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes")
                 .header("If-Match", "\"" + version + "\"")
-                .contentType(json()).content(Map.of("body", "second note"))
-                .andExpect(status().isConflict());
+                .contentType(json()).content(j(Map.of("body", "second note")))
+                ).andExpect(status().isConflict());
     }
 
     @Test
@@ -117,11 +133,11 @@ class IncidentConcurrencyTest extends ApiTestSupport {
             List<Callable<MvcResult>> jobs = java.util.stream.IntStream.range(0, writers)
                     .mapToObj(i -> (Callable<MvcResult>) () -> {
                         gate.await(5, java.util.concurrent.TimeUnit.SECONDS);
-                        return asEngineer(post("/api/v1/incidents/" + incidentId + "/assignment"))
+                        return asEngineer(post("/api/v1/incidents/" + incidentId + "/assignment")
                                 .contentType(json())
-                                .content(Map.of("expectedVersion", version,
+                                .content(j(Map.of("expectedVersion", version,
                                         "assignee", Map.of("email",
-                                                i % 2 == 0 ? "priya@sentinel.dev" : "marco@sentinel.dev")))
+                                                i % 2 == 0 ? "priya@sentinel.dev" : "marco@sentinel.dev")))))
                                 .andReturn();
                     })
                     .toList();
@@ -138,7 +154,7 @@ class IncidentConcurrencyTest extends ApiTestSupport {
 
         MvcResult detail = asViewer(get("/api/v1/incidents/" + incidentId)).andReturn();
         assertThat((String) body(detail).get("status")).isEqualTo("OPEN");
-        assertThat(body(detail).get("assignee")).as("exactly one owner").isNotNull();
+        assertThat(body(detail).get("assignedTo")).as("exactly one owner").isNotNull();
     }
 
     private static int statusOf(Future<MvcResult> future) {
@@ -152,14 +168,14 @@ class IncidentConcurrencyTest extends ApiTestSupport {
     @Test
     @DisplayName("an engineer may be handed an incident already being investigated")
     void acknowledgingAnInvestigatingIncidentIsTolerated() throws Exception {
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/investigate"))
-                .contentType(json()).content(Map.of())
-                .andExpect(status().isOk());
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/investigate")
+                .contentType(json()).content(j(Map.of()))
+                ).andExpect(status().isOk());
 
         // A second engineer clicks acknowledge after a page reload. Failing this would
         // be technically correct and practically hostile.
-        MvcResult result = asEngineer(post("/api/v1/incidents/" + incidentId + "/acknowledge"))
-                .contentType(json()).content(Map.of())
+        MvcResult result = asEngineer(post("/api/v1/incidents/" + incidentId + "/acknowledge")
+                .contentType(json()).content(j(Map.of())))
                 .andExpect(status().isOk()).andReturn();
 
         assertThat((String) body(result).get("status")).isEqualTo("INVESTIGATING");
@@ -170,19 +186,19 @@ class IncidentConcurrencyTest extends ApiTestSupport {
     void mutationsAreAudited() throws Exception {
         AppUser priya = users.findByEmailIgnoreCase("priya@sentinel.dev").orElseThrow();
 
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/acknowledge"))
-                .contentType(json()).content(Map.of()).andExpect(status().isOk());
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/assignment"))
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/acknowledge")
+                .contentType(json()).content(j(Map.of()))).andExpect(status().isOk());
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/assignment")
                 .contentType(json())
-                .content(Map.of("assignee", Map.of("email", "marco@sentinel.dev")))
+                .content(j(Map.of("assignee", Map.of("email", "marco@sentinel.dev")))))
                 .andExpect(status().isOk());
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes"))
-                .contentType(json()).content(Map.of("body", "rollback suspected"))
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes")
+                .contentType(json()).content(j(Map.of("body", "rollback suspected"))))
                 .andExpect(status().isOk());
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/resolve"))
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/resolve")
                 .contentType(json())
-                .content(Map.of("rootCause", "Connection pool exhaustion from a leaked cursor",
-                        "preventiveActions", "Add a leak test to the payment integration suite"))
+                .content(j(Map.of("rootCause", "Connection pool exhaustion from a leaked cursor",
+                        "preventiveActions", "Add a leak test to the payment integration suite"))))
                 .andExpect(status().isOk());
 
         MvcResult timeline = asViewer(get("/api/v1/incidents/" + incidentId + "/timeline"))
@@ -190,7 +206,7 @@ class IncidentConcurrencyTest extends ApiTestSupport {
 
         List<Map<String, Object>> entries = (List<Map<String, Object>>) body(timeline).get("entries");
         assertThat(entries).extracting(entry -> String.valueOf(entry.get("eventType")))
-                .contains("DETECTED", "ACKNOWLEDGED", "ASSIGNED", "NOTE", "RESOLVED");
+                .contains("INCIDENT_CREATED", "ACKNOWLEDGED", "ASSIGNED", "NOTE", "RESOLVED");
 
         // Sequences are dense and increasing: the timeline cursor is what a
         // reconnecting client uses to ask "what did I miss", and a gap would make it
@@ -214,39 +230,39 @@ class IncidentConcurrencyTest extends ApiTestSupport {
     void resolutionRequiresAVerifiedCause() throws Exception {
         // This is the distinction the project rests on: the model may suggest, only a
         // human decides. An empty cause would train the knowledge lookup on nothing.
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/resolve"))
-                .contentType(json()).content(Map.of("rootCause", "   "))
-                .andExpect(status().isBadRequest());
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/resolve")
+                .contentType(json()).content(j(Map.of("rootCause", "   ")))
+                ).andExpect(status().isBadRequest());
     }
 
     @Test
     @DisplayName("a resolved incident cannot be re-acknowledged")
     void resolvedIsTerminal() throws Exception {
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/resolve"))
-                .contentType(json()).content(Map.of("rootCause", "verified cause"))
-                .andExpect(status().isOk());
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/resolve")
+                .contentType(json()).content(j(Map.of("rootCause", "verified cause")))
+                ).andExpect(status().isOk());
 
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/acknowledge"))
-                .contentType(json()).content(Map.of())
-                .andExpect(status().isForbidden());
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/acknowledge")
+                .contentType(json()).content(j(Map.of()))
+                ).andExpect(status().isForbidden());
     }
 
     @Test
     @DisplayName("an incident cannot be assigned to a VIEWER")
     void viewerCannotOwnAnIncident() throws Exception {
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/assignment"))
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/assignment")
                 .contentType(json())
-                .content(Map.of("assignee", Map.of("email", "viewer@sentinel.dev")))
-                .andExpect(status().isForbidden());
+                .content(j(Map.of("assignee", Map.of("email", "viewer@sentinel.dev"))))
+                ).andExpect(status().isForbidden());
     }
 
     @Test
     @DisplayName("notes and state changes bump the version a client must echo back")
     void versionAdvancesOnEveryMutation() throws Exception {
-        int before = currentVersion();
+        long before = currentVersion();
 
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes"))
-                .contentType(json()).content(Map.of("body", "note"))
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes")
+                .contentType(json()).content(j(Map.of("body", "note"))))
                 .andExpect(status().isOk());
 
         assertThat(currentVersion()).isGreaterThan(before);
@@ -258,7 +274,8 @@ class IncidentConcurrencyTest extends ApiTestSupport {
         MvcResult result = asViewer(get("/api/v1/incidents/assignable-users"))
                 .andExpect(status().isOk()).andReturn();
 
-        List<Map<String, Object>> options = (List<Map<String, Object>>) body(result).get("items");
+        // A plain array, not a page: the caller wants the whole list.
+        List<Map<String, Object>> options = read(result, List.class);
         assertThat(options).isNotEmpty();
         assertThat(options).allSatisfy(option ->
                 assertThat(String.valueOf(option.get("role"))).isNotEqualTo("VIEWER"));
@@ -270,23 +287,23 @@ class IncidentConcurrencyTest extends ApiTestSupport {
         asViewer(get("/api/v1/incidents/" + incidentId)).andExpect(status().isOk());
         asViewer(get("/api/v1/incidents")).andExpect(status().isOk());
 
-        asViewer(post("/api/v1/incidents/" + incidentId + "/acknowledge"))
-                .contentType(json()).content(Map.of())
-                .andExpect(status().isForbidden());
+        asViewer(post("/api/v1/incidents/" + incidentId + "/acknowledge")
+                .contentType(json()).content(j(Map.of()))
+                ).andExpect(status().isForbidden());
     }
 
     @Test
     @DisplayName("timeline cursor pagination returns only entries the client missed")
     void timelineCursorIsResumable() throws Exception {
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes"))
-                .contentType(json()).content(Map.of("body", "first"))
-                .andExpect(status().isOk());
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes")
+                .contentType(json()).content(j(Map.of("body", "first")))
+                ).andExpect(status().isOk());
         long cursor = ((Number) body(asViewer(get("/api/v1/incidents/" + incidentId)).andReturn())
                 .get("timelineSeq")).longValue();
 
-        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes"))
-                .contentType(json()).content(Map.of("body", "second"))
-                .andExpect(status().isOk());
+        asEngineer(post("/api/v1/incidents/" + incidentId + "/notes")
+                .contentType(json()).content(j(Map.of("body", "second")))
+                ).andExpect(status().isOk());
 
         MvcResult resumed = asViewer(get("/api/v1/incidents/" + incidentId + "/timeline")
                         .param("afterSequence", String.valueOf(cursor)))

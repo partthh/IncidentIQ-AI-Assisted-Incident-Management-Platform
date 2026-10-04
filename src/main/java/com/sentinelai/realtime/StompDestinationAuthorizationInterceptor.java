@@ -9,6 +9,7 @@ import org.springframework.messaging.MessagingException;
 import org.springframework.messaging.simp.stomp.StompCommand;
 import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
 import org.springframework.messaging.support.ChannelInterceptor;
+import org.springframework.messaging.support.MessageHeaderAccessor;
 import org.springframework.stereotype.Component;
 
 /**
@@ -24,6 +25,14 @@ import org.springframework.stereotype.Component;
  *   <li>{@code /app/**} commands mutate state and require ENGINEER or ADMIN.
  *       A VIEWER may watch but never act.</li>
  * </ul>
+ *
+ * <p>Like the authentication interceptor, this reads the accessor <em>registered in the
+ * message headers</em> rather than {@link StompHeaderAccessor#wrap(Message)}. Spring writes
+ * the session principal onto that instance immediately before the frame reaches the
+ * channel — and does so after the message headers were already snapshotted, so a wrapped
+ * copy built from the message reads a principal that is not there. That mismatch presents
+ * as every subscription being refused as unauthenticated, which looks like a bad token and
+ * is not one.
  */
 @Component
 public class StompDestinationAuthorizationInterceptor implements ChannelInterceptor {
@@ -36,7 +45,10 @@ public class StompDestinationAuthorizationInterceptor implements ChannelIntercep
 
     @Override
     public Message<?> preSend(Message<?> message, MessageChannel channel) {
-        StompHeaderAccessor accessor = StompHeaderAccessor.wrap(message);
+        StompHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);
+        if (accessor == null) {
+            return message;
+        }
         StompCommand command = accessor.getCommand();
         if (!StompCommand.SUBSCRIBE.equals(command) && !StompCommand.SEND.equals(command)
                 && !StompCommand.UNSUBSCRIBE.equals(command)) {

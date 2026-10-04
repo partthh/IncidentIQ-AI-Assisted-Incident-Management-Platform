@@ -297,10 +297,31 @@ public class DetectionOrchestrator {
         return payload;
     }
 
+    /**
+     * The human-readable incident title.
+     *
+     * <p>Built from the event's raw message, not from its signature. The signature is a
+     * grouping key — {@link ErrorSignatureExtractor} replaces every number and id with a
+     * placeholder so near-identical messages collapse into one incident — which makes it
+     * exactly the wrong thing to show a person: "connection pool utilisation &lt;num&gt;
+     * percent" describes no observation at all. The signature still does its job, as the
+     * fingerprint input and as the stored grouping key; it just stops being display text.
+     *
+     * <p>Falls back to the signature, then the event type, so a blank message still
+     * yields something that names the problem rather than an empty title.
+     */
     private String buildTitle(ServiceEntity service, EventEntity event, RuleMatch match) {
-        String subject = event.getErrorSignature() == null ? event.getEventType().name()
-                : event.getErrorSignature();
+        String subject = firstNonBlank(event.getMessage(), event.getErrorSignature(), event.getEventType().name());
         return truncate(service.getName() + ": " + subject + " (" + match.ruleCode() + ")");
+    }
+
+    private static String firstNonBlank(String... candidates) {
+        for (String candidate : candidates) {
+            if (candidate != null && !candidate.isBlank()) {
+                return candidate.strip();
+            }
+        }
+        return "unknown";
     }
 
     private Map<String, Object> incidentSnapshot(IncidentEntity incident, String note) {

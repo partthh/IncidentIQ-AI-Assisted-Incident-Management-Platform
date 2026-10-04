@@ -38,6 +38,20 @@ public final class ErrorSignatureExtractor {
 
     private static final Pattern HEX_ID = Pattern.compile("\\b[0-9a-fA-F]{12,}\\b");
 
+    /**
+     * A number carrying a unit suffix: "1800ms", "2.5s", "95 %".
+     *
+     * <p>This runs before the bare-number patterns because none of them can match
+     * digits glued to letters: in {@code 1800ms} there is no word boundary after
+     * {@code 1800}, so {@code \b\d{4,}\b} never fires. Without this rule a latency
+     * probe sampled every few seconds produces a fresh signature each time and one
+     * ongoing outage is fragmented into hundreds of incidents. The unit is kept, not
+     * discarded, so "1800ms" and "1800" stay distinguishable and genuinely different
+     * quantities still do not merge.
+     */
+    private static final Pattern NUMBER_WITH_UNIT = Pattern.compile(
+            "\\b(\\d+(?:\\.\\d+)?)(\\s?(?:ms|s|m|h|d|%|x|rpm|qps|kib|mib|gib|req/s)\\b)");
+
     private static final Pattern LONG_DIGITS = Pattern.compile("\\b\\d{4,}\\b");
 
     private static final Pattern DECIMAL = Pattern.compile("\\b\\d+\\.\\d+\\b");
@@ -68,6 +82,7 @@ public final class ErrorSignatureExtractor {
                 .replaceAll(IPV4.pattern(), "<ip>")
                 .replaceAll(QUOTED.pattern(), "<val>")
                 .replaceAll(HEX_ID.pattern(), "<hex>")
+                .replaceAll(NUMBER_WITH_UNIT.pattern(), "<num>$2")
                 .replaceAll(LONG_DIGITS.pattern(), "<num>")
                 .replaceAll(DECIMAL.pattern(), "<num>")
                 .replaceAll(SMALL_NUMBER.pattern(), "<num>")

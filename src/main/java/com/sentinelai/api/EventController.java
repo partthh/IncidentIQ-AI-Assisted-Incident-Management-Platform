@@ -108,7 +108,9 @@ public class EventController {
 
     @GetMapping("/{eventId}")
     public EventView get(@PathVariable UUID eventId) {
-        return events.findById(eventId)
+        // findByIdWithService, not findById: the view needs the service name, and the
+        // repository call has already closed its transaction by the time we read it.
+        return events.findByIdWithService(eventId)
                 .map(EventView::from)
                 .orElseThrow(() -> NotFoundException.of("Event", eventId));
     }

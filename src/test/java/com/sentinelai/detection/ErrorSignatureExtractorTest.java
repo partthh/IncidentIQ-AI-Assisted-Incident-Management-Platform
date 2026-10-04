@@ -43,6 +43,39 @@ class ErrorSignatureExtractorTest {
                 .isEqualTo(ErrorSignatureExtractor.extract("upstream 10.4.2.20 unreachable"));
     }
 
+    /**
+     * The regression this guards is incident fragmentation, not tidiness: a latency
+     * probe reporting a different number every few seconds has no word boundary
+     * after its digits, so a bare {@code \b\d{4,}\b} leaves the raw value in place
+     * and every sample opens a new incident for one ongoing outage.
+     */
+    @Test
+    void numbersGluedToAUnitCollapseButKeepTheirUnit() {
+        String first = ErrorSignatureExtractor.extract("checkout latency p95 1800ms");
+        String second = ErrorSignatureExtractor.extract("checkout latency p95 2340ms");
+
+        assertThat(first).isEqualTo(second);
+        assertThat(first).doesNotContain("1800").doesNotContain("2340");
+
+        // Same digits, different unit: a different quantity, so it must not merge.
+        assertThat(ErrorSignatureExtractor.extract("queue depth 12"))
+                .isNotEqualTo(ErrorSignatureExtractor.extract("queue depth 12s"));
+        assertThat(ErrorSignatureExtractor.extract("error rate 12.4%"))
+                .isEqualTo(ErrorSignatureExtractor.extract("error rate 19.9%"));
+        assertThat(ErrorSignatureExtractor.extract("checkout latency p95 1800ms"))
+                .isNotEqualTo(ErrorSignatureExtractor.extract("cpu saturation 85%"));
+    }
+
+    /** "p95" names a percentile, not a quantity, so it must survive normalisation. */
+    @Test
+    void metricNamesAreNotMangled() {
+        assertThat(ErrorSignatureExtractor.extract("checkout latency p95 1800ms"))
+                .contains("p95");
+        // A unit must not be borrowed from the start of an unrelated word.
+        assertThat(ErrorSignatureExtractor.extract("top 3 services failing"))
+                .isEqualTo(ErrorSignatureExtractor.extract("top 9 services failing"));
+    }
+
     @Test
     void quotedValuesAreReplaced() {
         assertThat(ErrorSignatureExtractor.extract("user \"alice@example.com\" not authorised"))

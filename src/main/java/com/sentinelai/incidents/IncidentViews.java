@@ -3,6 +3,7 @@ package com.sentinelai.incidents;
 import com.sentinelai.common.HealthStatus;
 import com.sentinelai.common.Severity;
 import com.sentinelai.events.ServiceEntity;
+import jakarta.validation.constraints.NotBlank;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -119,7 +120,16 @@ public final class IncidentViews {
     public record NoteRequest(String body, Long expectedVersion) {
     }
 
-    public record ResolveRequest(String rootCause, String preventiveActions, Long expectedVersion) {
+    /**
+     * Resolution is the one transition that is irreversible and the one the knowledge
+     * lookup is trained on, so a verified cause is mandatory. Declaring it here means
+     * the caller gets a field-level error instead of a generic failure.
+     */
+    public record ResolveRequest(
+            @NotBlank(message = "a verified root cause is required to resolve an incident")
+            String rootCause,
+            String preventiveActions,
+            Long expectedVersion) {
     }
 
     public record AcknowledgeRequest(Long expectedVersion) {

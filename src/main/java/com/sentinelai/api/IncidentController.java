@@ -12,6 +12,7 @@ import com.sentinelai.investigation.AiAnalysisRepository;
 import com.sentinelai.investigation.AnalysisStatus;
 import com.sentinelai.investigation.AnalysisViews;
 import com.sentinelai.investigation.InvestigationQueueService;
+import jakarta.validation.Valid;
 import com.sentinelai.security.AppUserRepository;
 import com.sentinelai.security.CurrentUser;
 import com.sentinelai.security.SentinelPrincipal;
@@ -182,7 +183,7 @@ public class IncidentController {
     @PreAuthorize("hasAnyRole('ADMIN','ENGINEER')")
     public ResponseEntity<IncidentViews.Detail> resolve(
             @PathVariable UUID incidentId,
-            @RequestBody IncidentViews.ResolveRequest body,
+            @RequestBody @Valid IncidentViews.ResolveRequest body,
             @RequestHeader(value = "If-Match", required = false) String ifMatch) {
         Long expected = ApiSupport.expectedVersion(body.expectedVersion(), ifMatch);
         return ok(incidentService.resolve(incidentId, body.rootCause(), body.preventiveActions(),
