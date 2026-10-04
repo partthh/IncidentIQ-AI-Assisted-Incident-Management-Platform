@@ -45,8 +45,14 @@ class IncidentStateMachineTest {
 
     @Test
     void cannotSkipBackwardsInTheLifecycle() {
+        // Not the same as re-acknowledging while investigating, which is a tolerated
+        // no-op. Going from ACKNOWLEDGED back to OPEN is a genuine error.
+        assertThatThrownBy(() -> IncidentStateMachine.require(IncidentStatus.ACKNOWLEDGED,
+                IncidentStatus.OPEN))
+                .isInstanceOf(InvalidStateTransitionException.class);
+
         assertThatThrownBy(() -> IncidentStateMachine.require(IncidentStatus.INVESTIGATING,
-                IncidentStatus.ACKNOWLEDGED))
+                IncidentStatus.OPEN))
                 .isInstanceOf(InvalidStateTransitionException.class);
     }
 
@@ -78,10 +84,11 @@ class IncidentStateMachineTest {
 
     @Test
     void idempotentNoOpsDoNotCoverReversingDirection() {
-        // Being lenient about one retry must not become general leniency: going from
-        // ACKNOWLEDGED back to OPEN is a real error, not a retry.
+        // Being lenient about one retry must not become general leniency.
         assertThat(IncidentStateMachine.isIdempotentNoOp(IncidentStatus.ACKNOWLEDGED,
                 IncidentStatus.OPEN)).isFalse();
+        assertThat(IncidentStateMachine.isIdempotentNoOp(IncidentStatus.ACKNOWLEDGED,
+                IncidentStatus.INVESTIGATING)).isTrue();
         assertThatThrownBy(() -> IncidentStateMachine.require(IncidentStatus.ACKNOWLEDGED,
                 IncidentStatus.OPEN)).isInstanceOf(InvalidStateTransitionException.class);
     }

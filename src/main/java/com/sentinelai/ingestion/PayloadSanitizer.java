@@ -53,8 +53,14 @@ public final class PayloadSanitizer {
             // Provider-issued API keys (OpenAI, Stripe, GitHub, Slack).
             new Rule(Pattern.compile("(?i)\\b(?:sk|pk|ghp|xox[baprs])-?[A-Za-z0-9_-]{16,}\\b"), m -> REDACTED),
             // key=value / key: value / "key": "value" forms.
+            //
+            // The optional quote after the key name is what makes the JSON shape work:
+            // log lines routinely carry fragments like "client_secret": "abc123", and
+            // without it the pattern cannot reach the separator past the closing quote.
+            // The key group stays mandatory — making it optional would match any
+            // "host:5432" or "File.java:88" and redact ordinary diagnostic text.
             new Rule(Pattern.compile("(?i)\\b([a-z_]*(?:password|passwd|secret|token|api[_-]?key|"
-                            + "access[_-]?key|authorization|credential[a-z_]*)\\b)\\s*[:=]\\s*"
+                            + "access[_-]?key|authorization|credential[a-z_]*)\\b)\"?\\s*[:=]\\s*"
                             + "\"?[^\"',;\\s}]+\"?"),
                     m -> m.group(1) + "=" + REDACTED),
             // Email addresses: keep the domain (often the useful part) but drop the

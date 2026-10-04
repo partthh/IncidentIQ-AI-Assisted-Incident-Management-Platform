@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: com.sentinelai.PersistenceSmokeTest
--------------------------------------------------------------------------------
-Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 34.33 s -- in com.sentinelai.PersistenceSmokeTest
